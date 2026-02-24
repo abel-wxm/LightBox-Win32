@@ -1,0 +1,18 @@
+name: Build-x64-Native
+on: [push]
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup MSVC for x64
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64  # 这里强制指定编译 64 位版本
+      - name: Compile
+        run: cl.exe /O2 /Fe:LightBox_x64.exe main.cpp user32.lib shell32.lib gdi32.lib /subsystem:windows
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: DesktopOrganizer-64bit
+          path: LightBox_x64.exe
