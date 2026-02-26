@@ -1,3 +1,5 @@
+#include <windows.h>
+#include <windowsx.h>
 #include <map>
 #include <shellapi.h>
 #include <shlobj.h>
@@ -6,8 +8,7 @@
 #include <string>
 #include <strsafe.h>
 #include <vector>
-#include <windows.h>
-#include <windowsx.h>
+
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "ole32.lib")
