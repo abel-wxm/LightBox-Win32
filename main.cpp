@@ -119,10 +119,10 @@ LRESULT CALLBACK BoxWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         }
       }
       if (ctx->pBrowser) {
-        IFolderView *pView;
-        if (SUCCEEDED(ctx->pBrowser->GetCurrentView(IID_PPV_ARGS(&pView)))) {
-          pView->Refresh();
-          pView->Release();
+        IShellView *pShellView;
+        if (SUCCEEDED(ctx->pBrowser->GetCurrentView(IID_PPV_ARGS(&pShellView)))) {
+          pShellView->Refresh();
+          pShellView->Release();
         }
       }
     }
@@ -175,7 +175,7 @@ LRESULT CALLBACK BoxWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, RGB(200, 200, 200));
-    std::wstring title = L"DesktopBox";
+    std::wstring title = L"DesktopBox (Drop on Titlebar)";
     TextOutW(hdc, 10, 8, title.c_str(), (int)title.length());
 
     RECT rcClose = {rc.right - 40, 0, rc.right, CAPTION_HEIGHT};
@@ -273,7 +273,8 @@ void CreateNewBox() {
     RECT rc = {0, CAPTION_HEIGHT, 400, 300};
     FOLDERSETTINGS fs = {0};
     fs.ViewMode = FVM_ICON;
-    fs.fFlags = FWF_AUTOARRANGE | FWF_NOWEBVIEW | FWF_TRANSPARENT | FWF_HIDEFILENAMES | FWF_NODROPTARGET;
+    // 移除了臆想的 FWF_NODROPTARGET
+    fs.fFlags = FWF_AUTOARRANGE | FWF_NOWEBVIEW | FWF_TRANSPARENT | FWF_HIDEFILENAMES;
 
     ctx->pBrowser->Initialize(hwnd, &rc, &fs);
     ctx->pBrowser->SetOptions(EBO_NOBORDER);
@@ -283,9 +284,13 @@ void CreateNewBox() {
       
       IFolderView *pView;
       if (SUCCEEDED(ctx->pBrowser->GetCurrentView(IID_PPV_ARGS(&pView)))) {
-        HWND hwndView;
-        if (SUCCEEDED(pView->GetWindow(&hwndView))) {
-          SetWindowTheme(hwndView, L"DarkMode_Explorer", NULL);
+        IOleWindow *pOleWindow;
+        if (SUCCEEDED(pView->QueryInterface(IID_PPV_ARGS(&pOleWindow)))) {
+          HWND hwndView;
+          if (SUCCEEDED(pOleWindow->GetWindow(&hwndView))) {
+            SetWindowTheme(hwndView, L"DarkMode_Explorer", NULL);
+          }
+          pOleWindow->Release();
         }
         pView->Release();
       }
@@ -365,7 +370,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nShowCmd) {
-  SetProcessDpiAwareContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+  // 降级为最稳妥的 DPI 声明方式，避免宏缺失报错
+  SetProcessDPIAware();
 
   g_hInst = hInstance;
   if (FAILED(OleInitialize(NULL)))
