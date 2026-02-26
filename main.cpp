@@ -9,7 +9,6 @@
 #include <windows.h>
 #include <windowsx.h>
 
-
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "oleaut32.lib")
