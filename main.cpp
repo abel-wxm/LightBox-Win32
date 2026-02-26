@@ -1,5 +1,7 @@
+// clang-format off
 #include <windows.h>
 #include <windowsx.h>
+// clang-format on
 #include <map>
 #include <shellapi.h>
 #include <shlobj.h>
@@ -8,7 +10,6 @@
 #include <string>
 #include <strsafe.h>
 #include <vector>
-
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "ole32.lib")
@@ -166,6 +167,13 @@ LRESULT CALLBACK BoxWndProc(HWND hwnd, UINT uMsg, WPARAM wParam,
     FillRect(hdc, &rcCaption, hBrush);
     DeleteObject(hBrush);
 
+    // Fill view area with dark gray
+    RECT rcView = rc;
+    rcView.top = CAPTION_HEIGHT;
+    HBRUSH hViewBrush = CreateSolidBrush(RGB(40, 40, 40));
+    FillRect(hdc, &rcView, hViewBrush);
+    DeleteObject(hViewBrush);
+
     // Draw title text
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, RGB(230, 230, 230));
@@ -257,10 +265,9 @@ void CreateNewBox() {
                    baseFolder.c_str(), g_BoxCounter++);
   CreateDirectoryW(folderName, NULL);
 
-  HWND hwnd =
-      CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
-                      szBoxClassName, L"Box", WS_POPUP | WS_CLIPCHILDREN, 200,
-                      200, 400, 300, NULL, NULL, g_hInst, NULL);
+  HWND hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW, szBoxClassName,
+                              L"Box", WS_POPUP | WS_CLIPCHILDREN, 200, 200, 400,
+                              300, NULL, NULL, g_hInst, NULL);
 
   SetLayeredWindowAttributes(hwnd, 0, 200, LWA_ALPHA); // initial alpha
 
@@ -279,7 +286,7 @@ void CreateNewBox() {
     RECT rc = {0, CAPTION_HEIGHT, 400, 300};
     FOLDERSETTINGS fs = {0};
     fs.ViewMode = FVM_ICON; // Show large icons/thumbnails natively
-    fs.fFlags = FWF_AUTOARRANGE | FWF_NOWEBVIEW;
+    fs.fFlags = FWF_AUTOARRANGE | FWF_NOWEBVIEW | FWF_TRANSPARENT;
 
     ctx->pBrowser->Initialize(hwnd, &rc, &fs);
     ctx->pBrowser->SetOptions(EBO_NOBORDER);
@@ -368,7 +375,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT uMsg, WPARAM wParam,
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nShowCmd) {
   g_hInst = hInstance;
-  if (FAILED(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED)))
+  if (FAILED(OleInitialize(NULL)))
     return -1;
 
   WNDCLASSW wc = {0};
@@ -400,6 +407,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nShowCmd) {
 
   if (g_hMsgHook)
     UnhookWindowsHookEx(g_hMsgHook);
-  CoUninitialize();
+  OleUninitialize();
   return 0;
 }
