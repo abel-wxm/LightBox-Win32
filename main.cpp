@@ -1,7 +1,5 @@
-// clang-format off
 #include <windows.h>
 #include <windowsx.h>
-// clang-format on
 #include <map>
 #include <shellapi.h>
 #include <shlobj.h>
@@ -10,6 +8,7 @@
 #include <string>
 #include <strsafe.h>
 #include <vector>
+#include <uxtheme.h>
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "ole32.lib")
@@ -17,6 +16,7 @@
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "uxtheme.lib")
 
 #define WM_TRAYICON (WM_USER + 1)
 #define IDM_NEW_BOX 1001
@@ -37,48 +37,39 @@ struct BoxContext {
   std::wstring folderPath;
   int alpha;
 };
-
 std::map<HWND, BoxContext *> g_Boxes;
 
 std::wstring GetBaseFolder() {
   WCHAR path[MAX_PATH];
-  if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, path))) {
-    PathAppendW(path, L"DeskManageData");
+  if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_DESKTOPDIRECTORY, NULL, 0, path))) {
+    PathAppendW(path, L".DeskManageData");
     CreateDirectoryW(path, NULL);
+    SetFileAttributesW(path, FILE_ATTRIBUTE_HIDDEN);
     return std::wstring(path);
   }
   return L"";
 }
 
 void MoveFilesToDesktopAndClean(HWND hwndBox, const std::wstring &folderPath) {
-  PWSTR pszDesktop = NULL;
-  if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Desktop, 0, NULL, &pszDesktop))) {
+  WCHAR szDesktop[MAX_PATH];
+  if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_DESKTOPDIRECTORY, NULL, 0, szDesktop))) {
     WCHAR szFrom[MAX_PATH + 2] = {0};
     StringCchPrintfW(szFrom, MAX_PATH, L"%s\\*", folderPath.c_str());
-
     WCHAR szTo[MAX_PATH + 2] = {0};
-    StringCchCopyW(szTo, MAX_PATH, pszDesktop);
+    StringCchCopyW(szTo, MAX_PATH, szDesktop);
 
     SHFILEOPSTRUCTW sfo = {0};
     sfo.hwnd = hwndBox;
     sfo.wFunc = FO_MOVE;
     sfo.pFrom = szFrom;
     sfo.pTo = szTo;
-    // Move silently without user interaction, automatically renaming on
-    // collision
-    sfo.fFlags = FOF_NOCONFIRMATION | FOF_NOCONFIRMMKDIR | FOF_NOERRORUI |
-                 FOF_SILENT | FOF_RENAMEONCOLLISION;
+    sfo.fFlags = FOF_NOCONFIRMATION | FOF_NOCONFIRMMKDIR | FOF_NOERRORUI | FOF_SILENT | FOF_RENAMEONCOLLISION;
 
     SHFileOperationW(&sfo);
-
-    CoTaskMemFree(pszDesktop);
   }
-
-  // Delete the empty sub-folder
   RemoveDirectoryW(folderPath.c_str());
 }
 
-// Global mouse hook to catch WM_MOUSEWHEEL for transparency adjustment
 LRESULT CALLBACK GetMsgProc(int code, WPARAM wParam, LPARAM lParam) {
   if (code >= 0 && wParam == PM_REMOVE) {
     MSG *pMsg = (MSG *)lParam;
@@ -87,16 +78,10 @@ LRESULT CALLBACK GetMsgProc(int code, WPARAM wParam, LPARAM lParam) {
       if (hRoot && g_Boxes.find(hRoot) != g_Boxes.end()) {
         BoxContext *ctx = g_Boxes[hRoot];
         int delta = (short)HIWORD(pMsg->wParam);
-        // Adjust transparency
         ctx->alpha += (delta > 0) ? 15 : -15;
-        if (ctx->alpha < 40)
-          ctx->alpha = 40;
-        if (ctx->alpha > 255)
-          ctx->alpha = 255;
+        if (ctx->alpha < 40) ctx->alpha = 40;
+        if (ctx->alpha > 255) ctx->alpha = 255;
         SetLayeredWindowAttributes(hRoot, 0, ctx->alpha, LWA_ALPHA);
-
-        // If CTRL is held down, consume the scroll so it doesn't affect list
-        // view
         if (GetAsyncKeyState(VK_CONTROL) & 0x8000) {
           pMsg->message = WM_NULL;
         }
@@ -109,9 +94,41 @@ LRESULT CALLBACK GetMsgProc(int code, WPARAM wParam, LPARAM lParam) {
 #define BORDER_WIDTH 8
 #define CAPTION_HEIGHT 30
 
-LRESULT CALLBACK BoxWndProc(HWND hwnd, UINT uMsg, WPARAM wParam,
-                            LPARAM lParam) {
+LRESULT CALLBACK BoxWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
   switch (uMsg) {
+  case WM_DROPFILES: {
+    HDROP hDrop = (HDROP)wParam;
+    UINT count = DragQueryFileW(hDrop, 0xFFFFFFFF, NULL, 0);
+    if (g_Boxes.find(hwnd) != g_Boxes.end()) {
+      BoxContext *ctx = g_Boxes[hwnd];
+      for (UINT i = 0; i < count; i++) {
+        WCHAR filePath[MAX_PATH];
+        DragQueryFileW(hDrop, i, filePath, MAX_PATH);
+        
+        IShellLinkW *psl;
+        if (SUCCEEDED(CoCreateInstance(CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&psl)))) {
+          psl->SetPath(filePath);
+          IPersistFile *ppf;
+          if (SUCCEEDED(psl->QueryInterface(IID_PPV_ARGS(&ppf)))) {
+            WCHAR linkPath[MAX_PATH];
+            StringCchPrintfW(linkPath, MAX_PATH, L"%s\\%s.lnk", ctx->folderPath.c_str(), PathFindFileNameW(filePath));
+            ppf->Save(linkPath, TRUE);
+            ppf->Release();
+          }
+          psl->Release();
+        }
+      }
+      if (ctx->pBrowser) {
+        IFolderView *pView;
+        if (SUCCEEDED(ctx->pBrowser->GetCurrentView(IID_PPV_ARGS(&pView)))) {
+          pView->Refresh();
+          pView->Release();
+        }
+      }
+    }
+    DragFinish(hDrop);
+    return 0;
+  }
   case WM_NCHITTEST: {
     POINT pt;
     pt.x = GET_X_LPARAM(lParam);
@@ -124,33 +141,23 @@ LRESULT CALLBACK BoxWndProc(HWND hwnd, UINT uMsg, WPARAM wParam,
     bool isTop = pt.y < rc.top + BORDER_WIDTH;
     bool isBottom = pt.y > rc.bottom - BORDER_WIDTH;
 
-    if (isTop && isLeft)
-      return HTTOPLEFT;
-    if (isTop && isRight)
-      return HTTOPRIGHT;
-    if (isBottom && isLeft)
-      return HTBOTTOMLEFT;
-    if (isBottom && isRight)
-      return HTBOTTOMRIGHT;
-    if (isLeft)
-      return HTLEFT;
-    if (isRight)
-      return HTRIGHT;
-    if (isTop)
-      return HTTOP;
-    if (isBottom)
-      return HTBOTTOM;
+    if (isTop && isLeft) return HTTOPLEFT;
+    if (isTop && isRight) return HTTOPRIGHT;
+    if (isBottom && isLeft) return HTBOTTOMLEFT;
+    if (isBottom && isRight) return HTBOTTOMRIGHT;
+    if (isLeft) return HTLEFT;
+    if (isRight) return HTRIGHT;
+    if (isTop) return HTTOP;
+    if (isBottom) return HTBOTTOM;
 
-    // Check top caption bar for dragging and close button
     if (pt.y < rc.top + CAPTION_HEIGHT) {
-      RECT rcClose = {rc.right - rc.left - 40, 0, rc.right - rc.left,
-                      CAPTION_HEIGHT};
+      RECT rcClose = {rc.right - rc.left - 40, 0, rc.right - rc.left, CAPTION_HEIGHT};
       POINT ptClient = pt;
       ScreenToClient(hwnd, &ptClient);
       if (PtInRect(&rcClose, ptClient)) {
-        return HTCLIENT; // let it click the button
+        return HTCLIENT;
       }
-      return HTCAPTION; // allow dragging by caption
+      return HTCAPTION;
     }
     return HTCLIENT;
   }
@@ -160,33 +167,28 @@ LRESULT CALLBACK BoxWndProc(HWND hwnd, UINT uMsg, WPARAM wParam,
     RECT rc;
     GetClientRect(hwnd, &rc);
 
-    // Draw a simple dark caption bar
     RECT rcCaption = rc;
     rcCaption.bottom = CAPTION_HEIGHT;
-    HBRUSH hBrush = CreateSolidBrush(RGB(50, 50, 50));
+    HBRUSH hBrush = CreateSolidBrush(RGB(30, 30, 30));
     FillRect(hdc, &rcCaption, hBrush);
     DeleteObject(hBrush);
 
-    // Fill view area with dark gray
-    RECT rcView = rc;
-    rcView.top = CAPTION_HEIGHT;
-    HBRUSH hViewBrush = CreateSolidBrush(RGB(40, 40, 40));
-    FillRect(hdc, &rcView, hViewBrush);
-    DeleteObject(hViewBrush);
-
-    // Draw title text
     SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, RGB(230, 230, 230));
-    std::wstring title = L"DesktopBox (Drag here to move)";
+    SetTextColor(hdc, RGB(200, 200, 200));
+    std::wstring title = L"DesktopBox";
     TextOutW(hdc, 10, 8, title.c_str(), (int)title.length());
 
-    // Draw Close button
     RECT rcClose = {rc.right - 40, 0, rc.right, CAPTION_HEIGHT};
-    SetTextColor(hdc, RGB(255, 100, 100)); // Red X
+    SetTextColor(hdc, RGB(255, 80, 80));
     DrawTextW(hdc, L"X", -1, &rcClose, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-    // Draw thin borders around the window
-    HBRUSH hBorder = CreateSolidBrush(RGB(100, 100, 100));
+    RECT rcBody = rc;
+    rcBody.top = CAPTION_HEIGHT;
+    HBRUSH hBodyBrush = CreateSolidBrush(RGB(32, 32, 32));
+    FillRect(hdc, &rcBody, hBodyBrush);
+    DeleteObject(hBodyBrush);
+
+    HBRUSH hBorder = CreateSolidBrush(RGB(60, 60, 60));
     RECT rcLeft = {0, 0, 1, rc.bottom};
     FillRect(hdc, &rcLeft, hBorder);
     RECT rcRight = {rc.right - 1, 0, rc.right, rc.bottom};
@@ -208,12 +210,7 @@ LRESULT CALLBACK BoxWndProc(HWND hwnd, UINT uMsg, WPARAM wParam,
     GetClientRect(hwnd, &rc);
     RECT rcClose = {rc.right - 40, 0, rc.right, CAPTION_HEIGHT};
     if (PtInRect(&rcClose, pt)) {
-      // User clicked Close ('X')
-      if (MessageBoxW(hwnd,
-                      L"Are you sure you want to delete this folder?\nAll "
-                      L"files inside will be safely moved to Desktop.",
-                      L"Delete DesktopBox",
-                      MB_YESNO | MB_ICONWARNING) == IDYES) {
+      if (MessageBoxW(hwnd, L"Close this folder?", L"DeskManage", MB_YESNO | MB_ICONWARNING) == IDYES) {
         PostMessage(hwnd, WM_CLOSE, 0, 0);
       }
     }
@@ -225,8 +222,6 @@ LRESULT CALLBACK BoxWndProc(HWND hwnd, UINT uMsg, WPARAM wParam,
       if (ctx->pBrowser) {
         RECT rc;
         GetClientRect(hwnd, &rc);
-
-        // Position browser below caption bar and inside borders
         rc.top += CAPTION_HEIGHT;
         rc.left += 1;
         rc.right -= 1;
@@ -245,9 +240,7 @@ LRESULT CALLBACK BoxWndProc(HWND hwnd, UINT uMsg, WPARAM wParam,
         ctx->pBrowser->Release();
         ctx->pBrowser = NULL;
       }
-
       MoveFilesToDesktopAndClean(hwnd, ctx->folderPath);
-
       g_Boxes.erase(hwnd);
       delete ctx;
     }
@@ -261,15 +254,12 @@ LRESULT CALLBACK BoxWndProc(HWND hwnd, UINT uMsg, WPARAM wParam,
 void CreateNewBox() {
   std::wstring baseFolder = GetBaseFolder();
   WCHAR folderName[MAX_PATH];
-  StringCchPrintfW(folderName, MAX_PATH, L"%s\\DesktopBox_%d",
-                   baseFolder.c_str(), g_BoxCounter++);
+  StringCchPrintfW(folderName, MAX_PATH, L"%s\\Box_%d", baseFolder.c_str(), g_BoxCounter++);
   CreateDirectoryW(folderName, NULL);
 
-  HWND hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW, szBoxClassName,
-                              L"Box", WS_POPUP | WS_CLIPCHILDREN, 200, 200, 400,
-                              300, NULL, NULL, g_hInst, NULL);
-
-  SetLayeredWindowAttributes(hwnd, 0, 200, LWA_ALPHA); // initial alpha
+  HWND hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_ACCEPTFILES, szBoxClassName, L"Box", WS_POPUP | WS_CLIPCHILDREN, 200, 200, 400, 300, NULL, NULL, g_hInst, NULL);
+  SetLayeredWindowAttributes(hwnd, 0, 200, LWA_ALPHA);
+  DragAcceptFiles(hwnd, TRUE);
 
   BoxContext *ctx = new BoxContext();
   ctx->hwnd = hwnd;
@@ -279,32 +269,36 @@ void CreateNewBox() {
 
   g_Boxes[hwnd] = ctx;
 
-  HRESULT hr =
-      CoCreateInstance(CLSID_ExplorerBrowser, NULL, CLSCTX_INPROC_SERVER,
-                       IID_PPV_ARGS(&ctx->pBrowser));
-  if (SUCCEEDED(hr)) {
+  if (SUCCEEDED(CoCreateInstance(CLSID_ExplorerBrowser, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&ctx->pBrowser)))) {
     RECT rc = {0, CAPTION_HEIGHT, 400, 300};
     FOLDERSETTINGS fs = {0};
-    fs.ViewMode = FVM_ICON; // Show large icons/thumbnails natively
-    fs.fFlags = FWF_AUTOARRANGE | FWF_NOWEBVIEW | FWF_TRANSPARENT;
+    fs.ViewMode = FVM_ICON;
+    fs.fFlags = FWF_AUTOARRANGE | FWF_NOWEBVIEW | FWF_TRANSPARENT | FWF_HIDEFILENAMES | FWF_NODROPTARGET;
 
     ctx->pBrowser->Initialize(hwnd, &rc, &fs);
     ctx->pBrowser->SetOptions(EBO_NOBORDER);
-
     PIDLIST_ABSOLUTE pidl = NULL;
     if (SUCCEEDED(SHParseDisplayName(folderName, NULL, &pidl, 0, NULL))) {
       ctx->pBrowser->BrowseToIDList(pidl, SBSP_ABSOLUTE);
+      
+      IFolderView *pView;
+      if (SUCCEEDED(ctx->pBrowser->GetCurrentView(IID_PPV_ARGS(&pView)))) {
+        HWND hwndView;
+        if (SUCCEEDED(pView->GetWindow(&hwndView))) {
+          SetWindowTheme(hwndView, L"DarkMode_Explorer", NULL);
+        }
+        pView->Release();
+      }
       CoTaskMemFree(pidl);
     }
   }
 
   RECT rcSys;
   GetClientRect(hwnd, &rcSys);
-  PostMessage(hwnd, WM_SIZE, SIZE_RESTORED,
-              MAKELPARAM(rcSys.right, rcSys.bottom));
-
+  PostMessage(hwnd, WM_SIZE, SIZE_RESTORED, MAKELPARAM(rcSys.right, rcSys.bottom));
   ShowWindow(hwnd, SW_SHOW);
   UpdateWindow(hwnd);
+  SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
 void SetupTrayIcon(HWND hwnd) {
@@ -314,7 +308,7 @@ void SetupTrayIcon(HWND hwnd) {
   nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
   nid.uCallbackMessage = WM_TRAYICON;
   nid.hIcon = LoadIcon(NULL, IDI_APPLICATION);
-  StringCchCopyW(nid.szTip, ARRAYSIZE(nid.szTip), L"DeskManage (Right Click)");
+  StringCchCopyW(nid.szTip, ARRAYSIZE(nid.szTip), L"DeskManage");
   Shell_NotifyIconW(NIM_ADD, &nid);
 }
 
@@ -331,17 +325,15 @@ void ShowTrayMenu(HWND hwnd) {
   SetForegroundWindow(hwnd);
 
   HMENU hMenu = CreatePopupMenu();
-  AppendMenuW(hMenu, MF_STRING, IDM_NEW_BOX, L"New Box Folder");
+  AppendMenuW(hMenu, MF_STRING, IDM_NEW_BOX, L"New Box");
   AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-  AppendMenuW(hMenu, MF_STRING, IDM_EXIT, L"Exit App");
+  AppendMenuW(hMenu, MF_STRING, IDM_EXIT, L"Exit");
 
-  TrackPopupMenu(hMenu, TPM_BOTTOMALIGN | TPM_LEFTALIGN, pt.x, pt.y, 0, hwnd,
-                 NULL);
+  TrackPopupMenu(hMenu, TPM_BOTTOMALIGN | TPM_LEFTALIGN, pt.x, pt.y, 0, hwnd, NULL);
   DestroyMenu(hMenu);
 }
 
-LRESULT CALLBACK MainWndProc(HWND hwnd, UINT uMsg, WPARAM wParam,
-                             LPARAM lParam) {
+LRESULT CALLBACK MainWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
   switch (uMsg) {
   case WM_CREATE:
     SetupTrayIcon(hwnd);
@@ -360,7 +352,6 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT uMsg, WPARAM wParam,
     return 0;
   case WM_CLOSE:
     RemoveTrayIcon(hwnd);
-    // Destroy all boxes
     {
       auto boxesCopy = g_Boxes;
       for (auto &pair : boxesCopy) {
@@ -374,6 +365,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT uMsg, WPARAM wParam,
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nShowCmd) {
+  SetProcessDpiAwareContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
   g_hInst = hInstance;
   if (FAILED(OleInitialize(NULL)))
     return -1;
@@ -391,22 +384,17 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nShowCmd) {
   wcBox.lpszClassName = szBoxClassName;
   RegisterClassW(&wcBox);
 
-  g_hMainWnd = CreateWindowExW(0, szMainClassName, L"DeskManageMain", 0, 0, 0,
-                               0, 0, HWND_MESSAGE, NULL, hInstance, NULL);
-
-  // Filter mouse wheel globally on this thread to allow scroll over
-  // IExplorerBrowser adjust the parent's opacity
-  g_hMsgHook =
-      SetWindowsHookExW(WH_GETMESSAGE, GetMsgProc, NULL, GetCurrentThreadId());
-
+  g_hMainWnd = CreateWindowExW(0, szMainClassName, L"DeskManageMain", 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, hInstance, NULL);
+  
+  g_hMsgHook = SetWindowsHookExW(WH_GETMESSAGE, GetMsgProc, NULL, GetCurrentThreadId());
+  
   MSG msg;
   while (GetMessage(&msg, NULL, 0, 0)) {
     TranslateMessage(&msg);
     DispatchMessage(&msg);
   }
 
-  if (g_hMsgHook)
-    UnhookWindowsHookEx(g_hMsgHook);
+  if (g_hMsgHook) UnhookWindowsHookEx(g_hMsgHook);
   OleUninitialize();
   return 0;
 }
