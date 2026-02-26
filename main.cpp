@@ -9,6 +9,7 @@
 #include <strsafe.h>
 #include <vector>
 #include <uxtheme.h>
+#include <dwmapi.h>
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "ole32.lib")
@@ -17,6 +18,7 @@
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "uxtheme.lib")
+#pragma comment(lib, "dwmapi.lib")
 
 #define WM_TRAYICON (WM_USER + 1)
 #define IDM_NEW_BOX 1001
@@ -29,7 +31,6 @@ HINSTANCE g_hInst;
 HWND g_hMainWnd;
 UINT g_uTrayID = 1;
 HHOOK g_hMsgHook = NULL;
-int g_BoxCounter = 1;
 
 struct BoxContext {
   HWND hwnd;
@@ -39,10 +40,12 @@ struct BoxContext {
 };
 std::map<HWND, BoxContext *> g_Boxes;
 
+// 将底层文件夹移出桌面，放到用户根目录，既保证同盘移动，又绝不干扰桌面图标
 std::wstring GetBaseFolder() {
   WCHAR path[MAX_PATH];
   if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_DESKTOPDIRECTORY, NULL, 0, path))) {
-    PathAppendW(path, L".DeskManageData");
+    PathRemoveFileSpecW(path); 
+    PathAppendW(path, L".DeskManageBoxes");
     CreateDirectoryW(path, NULL);
     SetFileAttributesW(path, FILE_ATTRIBUTE_HIDDEN);
     return std::wstring(path);
@@ -96,39 +99,6 @@ LRESULT CALLBACK GetMsgProc(int code, WPARAM wParam, LPARAM lParam) {
 
 LRESULT CALLBACK BoxWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
   switch (uMsg) {
-  case WM_DROPFILES: {
-    HDROP hDrop = (HDROP)wParam;
-    UINT count = DragQueryFileW(hDrop, 0xFFFFFFFF, NULL, 0);
-    if (g_Boxes.find(hwnd) != g_Boxes.end()) {
-      BoxContext *ctx = g_Boxes[hwnd];
-      for (UINT i = 0; i < count; i++) {
-        WCHAR filePath[MAX_PATH];
-        DragQueryFileW(hDrop, i, filePath, MAX_PATH);
-        
-        IShellLinkW *psl;
-        if (SUCCEEDED(CoCreateInstance(CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&psl)))) {
-          psl->SetPath(filePath);
-          IPersistFile *ppf;
-          if (SUCCEEDED(psl->QueryInterface(IID_PPV_ARGS(&ppf)))) {
-            WCHAR linkPath[MAX_PATH];
-            StringCchPrintfW(linkPath, MAX_PATH, L"%s\\%s.lnk", ctx->folderPath.c_str(), PathFindFileNameW(filePath));
-            ppf->Save(linkPath, TRUE);
-            ppf->Release();
-          }
-          psl->Release();
-        }
-      }
-      if (ctx->pBrowser) {
-        IShellView *pShellView;
-        if (SUCCEEDED(ctx->pBrowser->GetCurrentView(IID_PPV_ARGS(&pShellView)))) {
-          pShellView->Refresh();
-          pShellView->Release();
-        }
-      }
-    }
-    DragFinish(hDrop);
-    return 0;
-  }
   case WM_NCHITTEST: {
     POINT pt;
     pt.x = GET_X_LPARAM(lParam);
@@ -169,13 +139,13 @@ LRESULT CALLBACK BoxWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 
     RECT rcCaption = rc;
     rcCaption.bottom = CAPTION_HEIGHT;
-    HBRUSH hBrush = CreateSolidBrush(RGB(30, 30, 30));
+    HBRUSH hBrush = CreateSolidBrush(RGB(20, 20, 20));
     FillRect(hdc, &rcCaption, hBrush);
     DeleteObject(hBrush);
 
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, RGB(200, 200, 200));
-    std::wstring title = L"DesktopBox (Drop on Titlebar)";
+    std::wstring title = L"DesktopBox (Scroll to adjust transparency)";
     TextOutW(hdc, 10, 8, title.c_str(), (int)title.length());
 
     RECT rcClose = {rc.right - 40, 0, rc.right, CAPTION_HEIGHT};
@@ -188,7 +158,7 @@ LRESULT CALLBACK BoxWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     FillRect(hdc, &rcBody, hBodyBrush);
     DeleteObject(hBodyBrush);
 
-    HBRUSH hBorder = CreateSolidBrush(RGB(60, 60, 60));
+    HBRUSH hBorder = CreateSolidBrush(RGB(50, 50, 50));
     RECT rcLeft = {0, 0, 1, rc.bottom};
     FillRect(hdc, &rcLeft, hBorder);
     RECT rcRight = {rc.right - 1, 0, rc.right, rc.bottom};
@@ -210,8 +180,18 @@ LRESULT CALLBACK BoxWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     GetClientRect(hwnd, &rc);
     RECT rcClose = {rc.right - 40, 0, rc.right, CAPTION_HEIGHT};
     if (PtInRect(&rcClose, pt)) {
-      if (MessageBoxW(hwnd, L"Close this folder?", L"DeskManage", MB_YESNO | MB_ICONWARNING) == IDYES) {
-        PostMessage(hwnd, WM_CLOSE, 0, 0);
+      // 只有手动点击红 X 才会执行物理还原并销毁文件夹
+      if (MessageBoxW(hwnd, L"Close and delete this folder?\nAll files inside will be safely moved back to Desktop.", L"Delete DeskManage Box", MB_YESNO | MB_ICONWARNING) == IDYES) {
+        BoxContext *ctx = g_Boxes[hwnd];
+        if (ctx->pBrowser) {
+          ctx->pBrowser->Destroy();
+          ctx->pBrowser->Release();
+          ctx->pBrowser = NULL;
+        }
+        MoveFilesToDesktopAndClean(hwnd, ctx->folderPath);
+        g_Boxes.erase(hwnd);
+        delete ctx;
+        DestroyWindow(hwnd);
       }
     }
     return 0;
@@ -233,6 +213,7 @@ LRESULT CALLBACK BoxWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     return 0;
   }
   case WM_CLOSE: {
+    // 软件正常退出时的处理，不删除文件夹，保留数据！
     if (g_Boxes.find(hwnd) != g_Boxes.end()) {
       BoxContext *ctx = g_Boxes[hwnd];
       if (ctx->pBrowser) {
@@ -240,7 +221,6 @@ LRESULT CALLBACK BoxWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         ctx->pBrowser->Release();
         ctx->pBrowser = NULL;
       }
-      MoveFilesToDesktopAndClean(hwnd, ctx->folderPath);
       g_Boxes.erase(hwnd);
       delete ctx;
     }
@@ -251,19 +231,16 @@ LRESULT CALLBACK BoxWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
   return DefWindowProc(hwnd, uMsg, wParam, lParam);
 }
 
-void CreateNewBox() {
-  std::wstring baseFolder = GetBaseFolder();
-  WCHAR folderName[MAX_PATH];
-  StringCchPrintfW(folderName, MAX_PATH, L"%s\\Box_%d", baseFolder.c_str(), g_BoxCounter++);
-  CreateDirectoryW(folderName, NULL);
-
-  HWND hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_ACCEPTFILES, szBoxClassName, L"Box", WS_POPUP | WS_CLIPCHILDREN, 200, 200, 400, 300, NULL, NULL, g_hInst, NULL);
+void CreateBoxFromPath(const std::wstring& folderPath) {
+  HWND hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW, szBoxClassName, L"Box", WS_POPUP | WS_CLIPCHILDREN, 200, 200, 400, 300, NULL, NULL, g_hInst, NULL);
+  
+  BOOL dark = TRUE;
+  DwmSetWindowAttribute(hwnd, 20, &dark, sizeof(dark)); 
   SetLayeredWindowAttributes(hwnd, 0, 200, LWA_ALPHA);
-  DragAcceptFiles(hwnd, TRUE);
 
   BoxContext *ctx = new BoxContext();
   ctx->hwnd = hwnd;
-  ctx->folderPath = folderName;
+  ctx->folderPath = folderPath;
   ctx->alpha = 200;
   ctx->pBrowser = NULL;
 
@@ -273,13 +250,12 @@ void CreateNewBox() {
     RECT rc = {0, CAPTION_HEIGHT, 400, 300};
     FOLDERSETTINGS fs = {0};
     fs.ViewMode = FVM_ICON;
-    // 移除了臆想的 FWF_NODROPTARGET
-    fs.fFlags = FWF_AUTOARRANGE | FWF_NOWEBVIEW | FWF_TRANSPARENT | FWF_HIDEFILENAMES;
+    fs.fFlags = FWF_AUTOARRANGE | FWF_NOWEBVIEW | FWF_HIDEFILENAMES | FWF_TRANSPARENT;
 
     ctx->pBrowser->Initialize(hwnd, &rc, &fs);
     ctx->pBrowser->SetOptions(EBO_NOBORDER);
     PIDLIST_ABSOLUTE pidl = NULL;
-    if (SUCCEEDED(SHParseDisplayName(folderName, NULL, &pidl, 0, NULL))) {
+    if (SUCCEEDED(SHParseDisplayName(folderPath.c_str(), NULL, &pidl, 0, NULL))) {
       ctx->pBrowser->BrowseToIDList(pidl, SBSP_ABSOLUTE);
       
       IFolderView *pView;
@@ -304,6 +280,34 @@ void CreateNewBox() {
   ShowWindow(hwnd, SW_SHOW);
   UpdateWindow(hwnd);
   SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}
+
+void CreateNewBox() {
+  std::wstring baseFolder = GetBaseFolder();
+  WCHAR folderName[MAX_PATH];
+  // 使用毫秒级时间戳确保文件夹命名不冲突
+  StringCchPrintfW(folderName, MAX_PATH, L"%s\\Box_%d", baseFolder.c_str(), GetTickCount());
+  CreateDirectoryW(folderName, NULL);
+  CreateBoxFromPath(folderName);
+}
+
+void LoadExistingBoxes() {
+  std::wstring baseFolder = GetBaseFolder();
+  WCHAR searchPath[MAX_PATH];
+  StringCchPrintfW(searchPath, MAX_PATH, L"%s\\Box_*", baseFolder.c_str());
+  
+  WIN32_FIND_DATAW ffd;
+  HANDLE hFind = FindFirstFileW(searchPath, &ffd);
+  if (hFind != INVALID_HANDLE_VALUE) {
+    do {
+      if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+        WCHAR fullPath[MAX_PATH];
+        StringCchPrintfW(fullPath, MAX_PATH, L"%s\\%s", baseFolder.c_str(), ffd.cFileName);
+        CreateBoxFromPath(fullPath);
+      }
+    } while (FindNextFileW(hFind, &ffd));
+    FindClose(hFind);
+  }
 }
 
 void SetupTrayIcon(HWND hwnd) {
@@ -332,75 +336,10 @@ void ShowTrayMenu(HWND hwnd) {
   HMENU hMenu = CreatePopupMenu();
   AppendMenuW(hMenu, MF_STRING, IDM_NEW_BOX, L"New Box");
   AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-  AppendMenuW(hMenu, MF_STRING, IDM_EXIT, L"Exit");
+  AppendMenuW(hMenu, MF_STRING, IDM_EXIT, L"Exit App");
 
   TrackPopupMenu(hMenu, TPM_BOTTOMALIGN | TPM_LEFTALIGN, pt.x, pt.y, 0, hwnd, NULL);
   DestroyMenu(hMenu);
 }
 
-LRESULT CALLBACK MainWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-  switch (uMsg) {
-  case WM_CREATE:
-    SetupTrayIcon(hwnd);
-    return 0;
-  case WM_TRAYICON:
-    if (lParam == WM_RBUTTONUP || lParam == WM_LBUTTONUP) {
-      ShowTrayMenu(hwnd);
-    }
-    return 0;
-  case WM_COMMAND:
-    if (LOWORD(wParam) == IDM_NEW_BOX) {
-      CreateNewBox();
-    } else if (LOWORD(wParam) == IDM_EXIT) {
-      PostMessage(hwnd, WM_CLOSE, 0, 0);
-    }
-    return 0;
-  case WM_CLOSE:
-    RemoveTrayIcon(hwnd);
-    {
-      auto boxesCopy = g_Boxes;
-      for (auto &pair : boxesCopy) {
-        SendMessage(pair.first, WM_CLOSE, 0, 0);
-      }
-    }
-    PostQuitMessage(0);
-    return 0;
-  }
-  return DefWindowProc(hwnd, uMsg, wParam, lParam);
-}
-
-int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nShowCmd) {
-  // 降级为最稳妥的 DPI 声明方式，避免宏缺失报错
-  SetProcessDPIAware();
-
-  g_hInst = hInstance;
-  if (FAILED(OleInitialize(NULL)))
-    return -1;
-
-  WNDCLASSW wc = {0};
-  wc.lpfnWndProc = MainWndProc;
-  wc.hInstance = hInstance;
-  wc.lpszClassName = szMainClassName;
-  RegisterClassW(&wc);
-
-  WNDCLASSW wcBox = {0};
-  wcBox.lpfnWndProc = BoxWndProc;
-  wcBox.hInstance = hInstance;
-  wcBox.hCursor = LoadCursor(NULL, IDC_ARROW);
-  wcBox.lpszClassName = szBoxClassName;
-  RegisterClassW(&wcBox);
-
-  g_hMainWnd = CreateWindowExW(0, szMainClassName, L"DeskManageMain", 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, hInstance, NULL);
-  
-  g_hMsgHook = SetWindowsHookExW(WH_GETMESSAGE, GetMsgProc, NULL, GetCurrentThreadId());
-  
-  MSG msg;
-  while (GetMessage(&msg, NULL, 0, 0)) {
-    TranslateMessage(&msg);
-    DispatchMessage(&msg);
-  }
-
-  if (g_hMsgHook) UnhookWindowsHookEx(g_hMsgHook);
-  OleUninitialize();
-  return 0;
-}
+LRESULT CALLBACK
